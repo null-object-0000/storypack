@@ -59,9 +59,9 @@ const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT}
 3. 【实体引用契约】命中已有实体后，最终 JSON 必须使用工具返回的 canonical name 作为 entityName/fromName/toName，
    不要使用当前文本中的别名再次创建实体（工具已通过别名定位到该实体）。
 4. 未命中检索的旧名字、以及真正第一次登场的新名字，一律作为新实体处理（newEntities 用 name 给出）。
-5. 【Evidence Grounding】每条 temporal 记录（chapter/fromChapter/firstSeenChapter）都要给出 evidence（原文短引）。
-   evidence 直接从你已读到的章节原文摘取即可；只有当你记不清某句出自哪一章、或要确认"最早"章节时，
-   才调用一次 search_chapter_evidence 检索——不要对每条记录都调用。
+5. 【Evidence Grounding】每条 temporal 记录（chapter/fromChapter/firstSeenChapter）都要给出 evidence——
+    一个 4~12 字的【关键短语】（该章原文某句话内的独特片段，不必逐字）；
+    程序会用它定位那句话并自动落定逐字原句为证据。只有当你记不清出处时，才调用一次 search_chapter_evidence。
 6. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，
    不要输出任何其他文字——禁止解释/思考/检索过程描述（中英文都不行），不要用 markdown 代码块围栏，
    结构标点必须用半角（, : { } [ ] "），避免中文全角标点（，：）。`;

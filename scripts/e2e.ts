@@ -162,7 +162,8 @@ function main(): number {
       1, 20, ch10
     );
     assert(ok.facts.length === 1, "正确 evidence 应通过");
-    assert(ok.facts[0].evidence === "张三每天都戴着一条红围巾", "evidence 应保留");
+    // 关键短语接地：evidence 落定为承载它的那一句逐字原文（含句末标点）
+    assert(ok.facts[0].evidence === "张三每天都戴着一条红围巾。", `evidence 应落定为该句逐字原文，实际：${ok.facts[0].evidence}`);
   });
 
   test("Evidence：错误 chapter（evidence 在 11 章，声明 10 章）→ FAIL", () => {
@@ -233,6 +234,52 @@ function main(): number {
       rejected = e instanceof ValidationError && /原文中不存在/.test((e as Error).message);
     }
     assert(rejected, "远距离拼接的 evidence 必须失败");
+  });
+
+  // ---- 关键短语接地（Evidence Phrase Grounding）----
+  test("Grounding：省略/近字短语也能接地并落定为逐字原句", () => {
+    const ch = new Map([[10, "张三每天都戴着一条红围巾。他心情不错，去找李四下棋。"]]);
+    const ok = validateExtractionOutput(
+      { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "戴红围巾", chapter: 10, confidence: 0.9, evidence: "张三戴着红围巾" }] },
+      1, 20, ch
+    );
+    assert(ok.facts.length === 1, "近字/省略短语应接地通过");
+    // evidence 落定为承载句的逐字原句（含句末标点）
+    assert(ok.facts[0].evidence === "张三每天都戴着一条红围巾。", `应落定为逐字原句，实际：${ok.facts[0].evidence}`);
+  });
+
+  test("Grounding：跨句短语（横跨两句话）→ FAIL", () => {
+    const ch = new Map([[10, "今天天气不错。张三每天都戴着一条红围巾。他去找李四。"]]);
+    let rejected = false;
+    let msg = "";
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "戴红围巾", chapter: 10, confidence: 0.9, evidence: "不错张三" }] },
+        1, 20, ch
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError;
+      msg = e instanceof Error ? e.message : "";
+    }
+    assert(rejected, "横跨两句话的短语必须失败");
+    assert(/横跨/.test(msg), `失败反馈应指出短语横跨两句，实际：${msg.slice(0, 160)}`);
+  });
+
+  test("Grounding：过泛短语（本章多句都出现）→ FAIL", () => {
+    const ch = new Map([[10, "马哥，冰泉街那边来消息了。马哥眉头一挑。马哥放下烟。"]]);
+    let rejected = false;
+    let msg = "";
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "马忠", type: "role", value: "与冰泉街勾结", chapter: 10, confidence: 0.9, evidence: "马哥" }] },
+        1, 20, ch
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError;
+      msg = e instanceof Error ? e.message : "";
+    }
+    assert(rejected, "多句出现的泛短语必须失败");
+    assert(/过泛/.test(msg), `失败反馈应指出短语过泛，实际：${msg.slice(0, 160)}`);
   });
 
   test("Evidence：错误 chapter 反馈带【定位】（evidence 在 11 章，声明 10 章）", () => {

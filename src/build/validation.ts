@@ -271,27 +271,110 @@ function snippetAround(raw: string, nt: string, ne: string): string {
     .replace(/\s+/g, " ");
 }
 
+// ---------- 关键短语接地（Evidence Phrase Grounding） ----------
+
+/** 章节原文 → 句子列表（保留逐字原文，供接地结果回贴）。
+ *  切分规则：只在 。！？ 后断句（……与换行不断句——小说对白大量按行排版，
+ *  按行切会把一句对白切成碎片），跟随其后的收尾引号（”』」）归入前句。 */
+export function splitIntoSentences(text: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== "。" && ch !== "！" && ch !== "？") continue;
+    let end = i + 1;
+    while (end < text.length && (text[end] === "”" || text[end] === "』" || text[end] === "」")) end++;
+    if (text.slice(start, end).trim().length > 0) out.push(text.slice(start, end));
+    start = end;
+  }
+  if (start < text.length && text.slice(start).trim().length > 0) out.push(text.slice(start));
+  return out;
+}
+
+/** 关键短语接地结果 */
+export interface GroundedEvidence {
+  ok: boolean;
+  /** 接地成功的逐字原句（ok=true 时有效） */
+  sentence?: string;
+  /** 命中强度：3=短语逐字连续出现在句中 2=近字容错 1=少量省略容错 */
+  score?: number;
+  /** 歧义：短语在本章【多句】都逐字出现（无法确定承载句）→ 判过泛，需换更独特短语 */
+  ambiguous?: boolean;
+}
+
+/** 在章节原文中为关键短语定位"承载它的那一句"，返回该句逐字原文。
+ *  匹配在【单句内】进行（normalize 后）：连续子串 > 近字容错 > 少量省略容错；
+ *  跨句短语一律不接地——证据落定的是完整一句话，拼接/编造无法借道通过。
+ *  多句命中取强度最高的一句（同强度取最早）；短语在本章多句都出现 → ambiguous=true（过泛）。 */
+export function groundEvidencePhrase(phrase: string, chapterText: string): GroundedEvidence {
+  const np = normalizeEvidenceText(phrase);
+  if (!np || np.length < 2) return { ok: false };
+  let best: GroundedEvidence | null = null;
+  let exactHits = 0;
+  for (const sentence of splitIntoSentences(chapterText)) {
+    const ns = normalizeEvidenceText(sentence);
+    if (!ns) continue;
+    let score = 0;
+    if (ns.includes(np)) {
+      score = 3;
+      exactHits++;
+    } else if (np.length <= TOLERANT_MAX_LEN && substringEditDistance(np, ns) <= editBudget(np.length)) score = 2;
+    else if (gapSequenceMatch(np, ns)) score = 1;
+    if (score > 0 && (!best || score > (best.score ?? 0))) {
+      best = { ok: true, sentence: sentence.trim(), score };
+    }
+    if (best && best.score === 3 && exactHits >= 2) {
+      // 歧义已确认（至少两句逐字命中），无需继续
+      return { ok: true, sentence: best.sentence, score: 3, ambiguous: true };
+    }
+  }
+  if (!best) return { ok: false };
+  return { ...best, ambiguous: (best.score ?? 0) === 3 && exactHits >= 2 };
+}
+
 /**
- * 定位 evidence 实际出现在本批哪些章节（失败反馈的"定向定位"）。
- * 只做诊断、绝不改数据——模型拿到"该 evidence 实际在第 X 章"后自己决定改 chapter 还是换 evidence。
- * 返回按章号升序的 { chapter, snippet, exact } 列表（exact = normalize 后严格连续出现）。
+ * 定位关键短语实际出现在本批哪些章节（失败反馈的"定向定位"）。
+ * 只做诊断、绝不改数据——模型拿到"该短语实际在第 X 章"后自己决定改 chapter 还是换短语。
+ * 两级信号：① 句级接地（强信号，exact = 某句 normalize 后连续包含短语）；
+ *          ② 整章容错（弱信号，近似——短语横跨多句或片段分散时仍能提示大致位置）。
+ * 返回按章号升序的 { chapter, snippet, exact } 列表。
  */
 function locateEvidenceInBatch(
   evidence: string,
   chapterTexts: Map<number, string>,
   skipChapter: number
 ): { chapter: number; snippet: string; exact: boolean }[] {
-  const ne = normalizeEvidenceText(evidence);
-  if (!ne) return [];
+  const np = normalizeEvidenceText(evidence);
+  if (!np) return [];
   const out: { chapter: number; snippet: string; exact: boolean }[] = [];
   for (const [c, text] of chapterTexts) {
     if (c === skipChapter) continue;
     const raw = text ?? "";
+    // ① 句级接地（强信号）：逐句找承载短语的那一句
+    let bestSentence: string | null = null;
+    let exact = false;
+    for (const sentence of splitIntoSentences(raw)) {
+      const ns = normalizeEvidenceText(sentence);
+      if (!ns) continue;
+      if (ns.includes(np)) {
+        exact = true;
+        bestSentence = sentence.trim();
+        break;
+      }
+      if (!bestSentence && np.length >= 4 && np.length <= TOLERANT_MAX_LEN && substringEditDistance(np, ns) <= editBudget(np.length)) {
+        bestSentence = sentence.trim();
+      } else if (!bestSentence && gapSequenceMatch(np, ns)) {
+        bestSentence = sentence.trim();
+      }
+    }
+    if (bestSentence) {
+      out.push({ chapter: c, exact, snippet: bestSentence.slice(0, 60) });
+      continue;
+    }
+    // ② 整章容错（弱信号，近似）
     const nt = normalizeEvidenceText(raw);
-    if (!nt) continue;
-    const exact = nt.includes(ne);
-    if (exact || nearMatch(ne, nt) || gapSequenceMatch(ne, nt)) {
-      out.push({ chapter: c, exact, snippet: snippetAround(raw, nt, ne) });
+    if (nt && (nearMatch(np, nt) || gapSequenceMatch(np, nt))) {
+      out.push({ chapter: c, exact: false, snippet: snippetAround(raw, nt, np) });
     }
   }
   return out.sort((a, b) => a.chapter - b.chapter);
@@ -321,15 +404,14 @@ export function diagnoseEvidenceMismatch(evidence: string, chapterText: string |
 
 /** 校验单条 temporal record 的 evidence：
  *  - chapterTexts 提供时（真实 Build）：
- *    · required 类型（facts/relations/memoryAnchors/aliases/abilities）：必须给出 evidence，且必须存在于声明章节原文；
- *      evidence 匹配为确定性容错匹配（见 evidenceInChapter：严格连续 / 近字 1~2 字 / 同句少量省略）；
- *      缺或错 → 记入 errors（不立即抛，便于一次性收集全部 evidence 错误）。
- *      错时还会附带【定向定位】：若 evidence 实际存在于本批其他章节，错误信息会点名该章节与原文片段，
- *      让模型直接改对 chapter（诊断信息，绝不代改数据）。
- *    · optional 类型（events/newEntities 的 firstSeen）：evidence 可缺；给出但验证不过 → 仅 warning（不整批失败，避免可选字段反噬）。
+ *    · required 类型（facts/relations/memoryAnchors/aliases/abilities）：必须给出 evidence——它现在是【关键短语】
+ *      （4~12 字的独特短语，不必逐字）；校验器把它【接地】到声明章节的某一句话（evidenceInChapter 的单句版：
+ *      逐字连续 > 近字容错 > 少量省略容错；跨句/过泛/过短/无法接地 → 记入 errors，并附【定向定位】与【直接修正指令】）。
+ *      接地成功后 evidence 落定为该句逐字原话（进 bundle/会话日志，不入库任何业务表）。
+ *    · optional 类型（events/newEntities 的 firstSeen）：evidence 可缺，仍按旧引文容错校验，不过仅是 warning（不整批失败）。
  *  - evidence 文本若在同一 Batch 的更早章节也出现，追加"可能不是最早 Reveal Chapter"的非致命 warning；
  *  - chapterTexts 缺失时（纯单元测试）：不要求 evidence，也不做强验证。
- *  错误统一由 validateExtractionOutput 在结尾 join 后抛 ValidationError（交给反馈循环回传 LLM 修正，代码不静默改写）。 */
+ *  错误统一由 validateExtractionOutput 在结尾 join 后抛 ValidationError（交给反馈循环回传 LLM 修正，代码不静默改写 knowledge）。 */
 function checkEvidence(
   record: {
     kindLabel: string;
@@ -344,70 +426,95 @@ function checkEvidence(
   /** 直接修正指令：evidence 已在【其他章节】被校验器确认存在 → 汇总成一行一条的"把 chapter 改为 X"，
    *  置于错误列表最前面。模型对明确指令的遵守率远高于让它自己从诊断段落里找答案。 */
   directives: string[]
-): void {
+): string | null {
   const ev = record.evidence;
-  if (!chapterTexts) return; // 无原文 map：不做 evidence 验证（单元测试/非 Build 调用）
+  if (!chapterTexts) return ev; // 无原文 map：不做 evidence 验证（单元测试/非 Build 调用）
   const text = chapterTexts.get(record.chapter);
   if (ev === null || ev.trim() === "") {
     if (record.required) {
       errors.push(
         `${record.kindLabel}${record.identify} 缺少 evidence。\n` +
-          `每条会影响 Reveal Time 的记录（chapter/fromChapter/firstSeenChapter）都必须提供来自该章原文的 evidence（短引用即可，不要总结或编造）。`
+          `每条会影响 Reveal Time 的记录（chapter/fromChapter/firstSeenChapter）都必须提供 evidence（4~12 字的独特关键短语，流水线会把它落定为该章原文中的完整原句；不要总结或编造）。`
       );
     }
-    return;
+    return ev;
   }
-  if (!evidenceInChapter(ev, text)) {
-    if (!record.required) {
-      // 可选类型：证据校验不过 → 非致命 warning（不整批失败）
+  if (!record.required) {
+    // 可选类型：evidence 仍按旧路径（引文容错校验，不过仅是 warning，不整批失败）
+    if (!evidenceInChapter(ev, text)) {
       warnings.push(
         `${record.kindLabel}${record.identify}：evidence「${ev}」在第${record.chapter}章原文中不存在（可选字段，未据此拦截）。如需保留该记录，请改用该章真实原文 evidence。`
       );
-      return;
     }
-    const diag = diagnoseEvidenceMismatch(ev, text);
-    const diagLine =
-      diag === "splice"
-        ? `诊断：evidence 的片段虽都出现在第${record.chapter}章，但彼此不连续（中间隔着原文其他内容）——它像是把该章两处/两句的片段拼接到了一起。请改为【逐字照抄】该章【单独一句】中连续出现的原文片段（≤25 字），不要跨句/跨片段拼接（即使不写省略号）。`
-        : `诊断：第${record.chapter}章原文中似乎找不到 evidence 里的文字——evidence 可能是总结/改写或编造，或 chapter 填错。请改用第${record.chapter}章真实原文中连续出现的短句。`;
-    // 定向定位：evidence 在本批【其他章节】原文中实际存在 → 告诉模型它写到了哪一章，
-    // 让它直接改 chapter（或改用声明章节里逐字存在的短句）。只诊断不代改（绝不静默改数据）。
+    return ev;
+  }
+
+  // ---- required 类型：关键短语接地（Evidence Phrase Grounding）----
+  const grounded = groundEvidencePhrase(ev, text ?? "");
+  if (!grounded.ok) {
+    const ne = normalizeEvidenceText(ev);
+    if (ne.length < 2) {
+      errors.push(
+        `${record.kindLabel}${record.identify} 关键短语过短（normalize 后 ${ne.length} 字）：「${ev}」。\n` +
+          `evidence 请给出独特、能定位到第${record.chapter}章原文某句话的关键短语（如「马哥，冰泉街那边来消息了」），流水线会自动落定该句原话。`
+      );
+      return ev;
+    }
+    // 诊断：整章层面能否找到（能 → 短语横跨多句；不能 → 不存在/编造/章号错）
+    const nt = normalizeEvidenceText(text ?? "");
+    const across = nt ? nearMatch(ne, nt) || gapSequenceMatch(ne, nt) : false;
+    const diagLine = across
+      ? `诊断：短语${ne.length <= 8 ? "" : "的片段"}在第${record.chapter}章能零散找到，但【没有任何单独一句】完整承载它——它像是横跨了两句/两处。关键短语必须落在该章【同一句】内（流水线只认单句内的定位）。`
+      : `诊断：第${record.chapter}章原文中似乎找不到该关键短语——短语可能是总结/编造，或 chapter 填错。请改用第${record.chapter}章真实原文中某句话内的连续字句（不必逐字，4~12 字即可）。`;
+    // 定向定位：短语在本批【其他章节】被句级接地/近似定位到 → 告诉模型它写到了哪一章
     const loc = locateEvidenceInBatch(ev, chapterTexts, record.chapter);
     let locLine = "";
     if (loc.length > 0) {
       const chapters = loc.map((l) => l.chapter).join("、");
       const first = loc[0];
       locLine =
-        `\n定位：该 evidence 实际可在第${chapters}章原文中找到` +
+        `\n定位：该短语实际可在第${chapters}章原文中找到` +
         (first.exact ? "" : "（近似）") +
         `——如第${first.chapter}章原文：…${first.snippet}…。` +
-        `请把本记录的 chapter 改为该 evidence 实际所在的章节；若该知识其实最早在第${record.chapter}章揭晓，则请改用第${record.chapter}章原文中【逐字】出现的连续短句作为 evidence。`;
-      // 直接修正指令（仅在有"精确出现"的定位章节时给出——近似定位只保留诊断，不升级为指令）
+        `请把本记录的 chapter 改为短语实际所在的章节；若该知识其实最早在第${record.chapter}章揭晓，则请改用第${record.chapter}章原文中的关键短语。`;
+      // 直接修正指令（仅在有"句级精确命中"的定位章节时给出——近似定位只保留诊断，不升级为指令）
       const exacts = loc.filter((l) => l.exact);
       if (exacts.length > 0) {
-        const target = exacts[0]; // 最早出现的精确章节 = 最可能的最早 Reveal
+        const target = exacts[0];
         directives.push(
-          `- ${record.kindLabel}「${record.identify}」：evidence「${ev.slice(0, 25)}」已确认存在于第${target.chapter}章原文 → 请把 chapter 从 ${record.chapter} 改为 ${target.chapter}（evidence 内容保持不变）；若该知识确实最早在第${record.chapter}章揭晓，则请改用第${record.chapter}章原文中逐字出现的短句作为 evidence。`
+          `- ${record.kindLabel}「${record.identify}」：关键短语「${ev.slice(0, 25)}」已确认存在于第${target.chapter}章原文（第${target.chapter}章句子：…${target.snippet}…）→ 请把 chapter 从 ${record.chapter} 改为 ${target.chapter}（短语内容保持不变）；若该知识确实最早在第${record.chapter}章揭晓，则请改用第${record.chapter}章原文中的关键短语。`
         );
       }
     }
     errors.push(
-      `${record.kindLabel}${record.identify} 声明 chapter=${record.chapter}，但 evidence「${ev}」在第${record.chapter}章原文中不存在（normalize 后未匹配）。\n` +
+      `${record.kindLabel}${record.identify} 声明 chapter=${record.chapter}，但 evidence「${ev}」在第${record.chapter}章原文中不存在（无法接地到该章任何一句，normalize 后未匹配）。\n` +
         `${diagLine}${locLine}\n` +
-        `请重新确认该信息首次被读者得知的章节，并提供该章真实原文 evidence（短引用，来自当前 Batch）。`
+        `请重新确认该信息首次被读者得知的章节，并提供该章真实原文中的关键短语（4~12 字，来自当前 Batch）。`
     );
-    return;
+    return ev;
   }
-  // 最早证据 soft warning：同一 evidence 是否在更早章节也出现（提示 chapter 可能不是最早 Reveal）
+  if (grounded.ambiguous) {
+    // 歧义守卫：短语在本章多句都出现 → 无法确定承载原句，判"过泛"，要求换更独特短语
+    errors.push(
+      `${record.kindLabel}${record.identify} 关键短语过泛：「${ev}」在第${record.chapter}章【多句】中都出现，无法确定承载原句。\n` +
+        `请换成更独特的关键短语——带上这句话特有的词（如把「马哥」扩成「马哥，冰泉街那边来消息了」），流水线会自动落定该句原话。`
+    );
+    return ev;
+  }
+
+  // 接地成功：evidence 落定为该句逐字原话（进 bundle/会话日志，不入库）
+  const effective = grounded.sentence ?? ev;
+  // 最早证据 soft warning：同一短语是否在更早章节也出现（提示 chapter 可能不是最早 Reveal）
   const ne = normalizeEvidenceText(ev);
   for (const [c, t] of chapterTexts) {
     if (c < record.chapter && normalizeEvidenceText(t).includes(ne)) {
       warnings.push(
-        `${record.kindLabel}${record.identify}：evidence「${ev}」在第${c}章也出现，声明章节 ${record.chapter} 可能不是最早 Reveal Chapter（如需更精确，请改用第${c}章的 evidence）。`
+        `${record.kindLabel}${record.identify}：关键短语「${ev}」在第${c}章也出现，声明章节 ${record.chapter} 可能不是最早 Reveal Chapter（如需更精确，请改用第${c}章的 evidence）。`
       );
       break;
     }
   }
+  return effective;
 }
 
 /** 抽取 JSON 的顶层数组字段（不含 batchSummary 字符串） */
@@ -467,8 +574,7 @@ export function validateExtractionOutput(
     if (!name) throw new ValidationError("newEntities.name 缺失");
     if (!type || !ENTITY_TYPES.includes(type as any)) throw new ValidationError(`newEntities.type 非法：${type}`);
     const chapter = checkChapterInRange((e as any).firstSeenChapter, startChapter, endChapter, `实体 ${name}`);
-    const evidence = str((e as any).evidence);
-    checkEvidence({ kindLabel: "新实体", identify: `「${name}」首次出场`, chapter, evidence, required: false }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "新实体", identify: `「${name}」首次出场`, chapter, evidence: str((e as any).evidence), required: false }, chapterTexts, warnings, errors, directives);
     newNames.add(name);
     newEntities.push({ name, type, firstSeenChapter: chapter, evidence });
   }
@@ -481,8 +587,7 @@ export function validateExtractionOutput(
     if (!entityName) throw new ValidationError("aliases.entityName 缺失");
     if (!alias) throw new ValidationError("aliases.alias 缺失");
     const chapter = checkChapterInRange((a as any).fromChapter, startChapter, endChapter, `别名 ${alias}`);
-    const evidence = str((a as any).evidence);
-    checkEvidence({ kindLabel: "别名", identify: `「${alias}」（→${entityName}）`, chapter, evidence, required: true }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "别名", identify: `「${alias}」（→${entityName}）`, chapter, evidence: str((a as any).evidence), required: true }, chapterTexts, warnings, errors, directives);
     aliases.push({ entityName, alias, fromChapter: chapter, evidence });
   }
 
@@ -497,8 +602,7 @@ export function validateExtractionOutput(
     if (!value) throw new ValidationError("facts.value 缺失");
     const chapter = checkChapterInRange((f as any).chapter, startChapter, endChapter, `事实 ${value.slice(0, 20)}`);
     const confidence = checkConfidence((f as any).confidence ?? 0.8, `事实 ${value.slice(0, 20)}`);
-    const evidence = str((f as any).evidence);
-    checkEvidence({ kindLabel: "事实", identify: `实体「${entityName}」「${value.slice(0, 20)}」`, chapter, evidence, required: true }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "事实", identify: `实体「${entityName}」「${value.slice(0, 20)}」`, chapter, evidence: str((f as any).evidence), required: true }, chapterTexts, warnings, errors, directives);
     facts.push({ entityName, type, value, chapter, confidence, evidence });
     if (value.length > 500) throw new ValidationError(`事实描述过长：${value.slice(0, 30)}...`);
   }
@@ -514,8 +618,7 @@ export function validateExtractionOutput(
     if (fromName === toName) throw new ValidationError(`关系两端不能相同：${fromName}`);
     const chapter = checkChapterInRange((r as any).chapter, startChapter, endChapter, `关系 ${fromName}-${toName}`);
     const confidence = checkConfidence((r as any).confidence ?? 0.8, `关系 ${fromName}-${toName}`);
-    const evidence = str((r as any).evidence);
-    checkEvidence({ kindLabel: "关系", identify: `${fromName}->${toName}「${type}」`, chapter, evidence, required: true }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "关系", identify: `${fromName}->${toName}「${type}」`, chapter, evidence: str((r as any).evidence), required: true }, chapterTexts, warnings, errors, directives);
     relations.push({ fromName, toName, type, detail: str((r as any).detail), chapter, confidence, evidence });
   }
 
@@ -530,9 +633,8 @@ export function validateExtractionOutput(
     let acquired: number | null = null;
     const ac = (ab as any).acquiredChapter;
     if (ac !== null && ac !== undefined && ac !== "") acquired = checkPastChapter(ac, endChapter, `能力 ${name} 获得章节`);
-    const evidence = str((ab as any).evidence);
     // ability.chapter（Reveal Chapter）需要 evidence；acquiredChapter 是 Story Time（可能描述历史获得），不要求原文在当章直接出现
-    checkEvidence({ kindLabel: "能力", identify: `实体「${entityName}」能力「${name}」`, chapter, evidence, required: true }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "能力", identify: `实体「${entityName}」能力「${name}」`, chapter, evidence: str((ab as any).evidence), required: true }, chapterTexts, warnings, errors, directives);
     abilities.push({
       entityName, name,
       category: str((ab as any).category),
@@ -557,8 +659,7 @@ export function validateExtractionOutput(
     if (ps !== undefined && ps !== null && !Array.isArray(ps)) throw new ValidationError("events.participantNames 必须是数组");
     const names = Array.isArray(ps) ? (ps as unknown[]).filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean) : [];
     const importn = num((e as any).importance) ?? 0.5;
-    const evidence = str((e as any).evidence);
-    checkEvidence({ kindLabel: "事件", identify: `「${summary.slice(0, 20)}」`, chapter, evidence, required: false }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "事件", identify: `「${summary.slice(0, 20)}」`, chapter, evidence: str((e as any).evidence), required: false }, chapterTexts, warnings, errors, directives);
     events.push({ chapter, participantNames: names, type: str((e as any).type) ?? "other", summary, importance: Math.min(1, Math.max(0, importn)), evidence });
   }
 
@@ -582,8 +683,7 @@ export function validateExtractionOutput(
     const imp = num((m as any).importance) ?? 0.5;
     const mem = num((m as any).memorability) ?? 0.7;
     const pr = num((m as any).protagonistRelevance) ?? 0.5;
-    const evidence = str((m as any).evidence);
-    checkEvidence({ kindLabel: "记忆锚点", identify: `实体「${entityName}」「${summary.slice(0, 16)}」`, chapter, evidence, required: true }, chapterTexts, warnings, errors, directives);
+    const evidence = checkEvidence({ kindLabel: "记忆锚点", identify: `实体「${entityName}」「${summary.slice(0, 16)}」`, chapter, evidence: str((m as any).evidence), required: true }, chapterTexts, warnings, errors, directives);
     memoryAnchors.push({
       entityName, chapter, summary, kind,
       importance: Math.min(1, Math.max(0, imp)),

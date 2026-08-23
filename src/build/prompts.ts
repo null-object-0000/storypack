@@ -96,30 +96,24 @@ MemoryAnchor 的 summary 要**保留用户可能用来回忆的原话感**：具
 所有带 chapter / fromChapter / firstSeenChapter 的 temporal 记录，其章节号表示：
 > **读者最早从哪一章可以获得这条知识（Reveal Chapter）**——不是凭印象填写的"大概在哪章"。
 
-**每条 temporal 记录必须同时给出 "evidence"**：来自该章原文的**短引用**（≤ 25 字），程序会做确定性校验：
-> evidence 必须真实存在于 record.chapter 对应的章节原文（normalize 空白/标点后 substring 匹配）。
-> 校验不通过 → 整批重试，反馈会点名错误，请据此修正 chapter 或 evidence。
+**每条 temporal 记录必须同时给出 "evidence"——一个关键短语**（4~12 字，允许轻微记错，不需要逐字）：
+> 程序会用【关键短语接地】：把你给的短语在 record.chapter 对应的章节原文里定位到【承载它的那一句话】，
+> 并用该句的【逐字原话】作为正式证据。校验不通过 → 整批重试，反馈会点名错误，请据此修正 chapter 或短语。
 
 填写规则（不能凭印象）：
-1. **evidence 必须来自原文**：短 quote 即可（如「正在拉车的，是老三闻人佑」「平日里都是老三做饭」），
-   不要整段复制、不要自己总结成另一句话、不要编造。
-2. **chapter 必须与 evidence 同章**：evidence 出自第几章，chapter 就填第几章。
-3. **chapter 应填"当前输入中最早明确支持该知识"的 Reveal Chapter**：即使后面章节再次提到，也不要写后面的章节。
-4. **不要混淆"实体首次出现"与"知识揭晓"**：例如人物第362章以「三师兄」出现、第392章才揭晓姓名「闻人佑」——
-   firstSeenChapter 可以较早，但 canonical name 相关知识的 reveal 不得早于 392（届时才出现在原文）。
-5. **evidence 直接从你已读到的章节原文引用即可，不要逐条调用 search_chapter_evidence**：
-   「待抽取章节」全文都在你的输入里，你只需把某条知识对应章节里的原句摘出来作为 evidence。
+1. **evidence = 关键短语，不是整句引文**：给出 4~12 字的独特短语即可（如「马哥，冰泉街那边来消息了」），
+   不必逐字、不必带标点；程序会自动落定它所在的那句话原文。
+2. **短语必须能在该章【同一句话】里找到**：禁止把两句话/两处的文字拼成一个短语；禁止用不同位置的片段凑字。
+3. **短语要独特**：不能是满章都出现的外号（如「马哥」），要带上这句话特有的词，让程序能确定是哪一句。
+4. **chapter 必须与短语同章**：短语出自第几章，chapter 就填第几章。
+5. **chapter 应填"当前输入中最早明确支持该知识"的 Reveal Chapter**：即使后面章节再次提到，也不要写后面的章节。
+6. **不要混淆"实体首次出现"与"知识揭晓"**：例如人物第362章以「三师兄」出现、第392章才揭晓姓名——firstSeenChapter 可以较早，
+   但 canonical name 相关知识的 reveal 不得早于 392（届时才出现在原文）。
+7. **evidence 直接从你已读到的章节原文引用即可，不要逐条调用 search_chapter_evidence**：
+   「待抽取章节」全文都在你的输入里，你只需把某条知识对应章节里的原句摘出其中的【关键短语】。
    只有当你确实记不清某句话出自哪一章、或需要确认"最早"支持章节时，才调用 search_chapter_evidence 检索一次。
    对每条 fact/relation/anchor 都去调用工具会非常浪费——直接引用即可。
-6. **evidence 宁短勿长、务必逐字**（最高频失败原因，务必照做）：
-   - 引用前在脑中【默读一遍】该章原句，逐字抄录。标点可省略，但不要增/删/改字（校验器接受与原文仅差 1~2 字的近似，但逐字最稳）。
-   - 宁可引用 3~12 字的极短精确片段（如「口令。」「马哥，冰泉街那边来消息了。」「我丢了一颗心」），
-     也不要引用你记不准的长句——长句多一个字、少一个字、改一个字都会导致整批重试。
-   - 只允许省略"同一句内的填充成分"（如原文「……几根头发，与微小的碎皮屑全部收集起来」可引「几根头发收集起来」）；
-     【禁止】把不同句子/远处片段的文字拼接成一句话。
-7. **chapter 填错（±1~2 章）是另一最高频失败原因**：evidence 明明是本批某章的原句，但 chapter 填成了相邻章节。
-   若校验反馈里出现【定位：该 evidence 实际可在第 X 章原文中找到】，说明你的 evidence 是对的、只是章节写错了——
-   直接把该记录的 chapter 改为 X；只有当该知识确实最早在别的章节揭晓时，才改用那章原文的短句作为 evidence。
+8. **宁可给短而独特的短语，不要给长而模糊的句子**；一句话内最独特的 4~12 个字就是最好的短语。
 
 ## 输出格式
 只输出一个 JSON 对象，不要输出任何其他文字：
@@ -127,21 +121,22 @@ MemoryAnchor 的 summary 要**保留用户可能用来回忆的原话感**：具
 - 【硬性】JSON 的结构标点必须用半角英文（逗号 , 、冒号 : 、花括号 { } 、方括号 [ ] 、引号 "）；字符串值内部可以用中文标点，但**不要把中文标点（，：）用在结构分隔上**。
 - 直接以 { 开头、以 } 结尾。格式：
 {
-  "newEntities": [{ "name": "...", "type": "character|organization|location|item|concept", "firstSeenChapter": 1, "evidence": "首次出现的原文短引" }],
-  "aliases": [{ "entityName": "...", "alias": "...", "fromChapter": 1, "evidence": "该称呼出现在本章的原文短引" }],
-  "facts": [{ "entityName": "...", "type": "role|identity|personality|affiliation|status|occupation|appearance|ability|habit|description|other", "value": "...", "chapter": 1, "confidence": 0.9, "evidence": "本章原文短引" }],
-  "relations": [{ "fromName": "...", "toName": "...", "type": "...", "detail": "...", "chapter": 1, "confidence": 0.9, "evidence": "本章原文短引" }],
-  "abilities": [{ "entityName": "...", "name": "...", "category": "ability", "system": "...", "path": "...", "level": "...", "sourceEntity": "...", "acquiredChapter": 1, "summary": "...", "chapter": 1, "evidence": "读者在本章得知该能力的原文短引" }],
-  "events": [{ "chapter": 1, "participantNames": ["..."], "type": "...", "summary": "...", "importance": 0.5, "evidence": "本章原文短引" }],
-  "memoryAnchors": [{ "entityName": "...", "chapter": 1, "kind": "visual|behavior|habit|interaction|role|quote", "summary": "...", "importance": 0.6, "memorability": 0.9, "protagonistRelevance": 0.5, "evidence": "本章原文短引" }],
+  "newEntities": [{ "name": "...", "type": "character|organization|location|item|concept", "firstSeenChapter": 1, "evidence": "首次出场的原文关键短语" }],
+  "aliases": [{ "entityName": "...", "alias": "...", "fromChapter": 1, "evidence": "该称呼所在句的关键短语" }],
+  "facts": [{ "entityName": "...", "type": "role|identity|personality|affiliation|status|occupation|appearance|ability|habit|description|other", "value": "...", "chapter": 1, "confidence": 0.9, "evidence": "本章原文关键短语" }],
+  "relations": [{ "fromName": "...", "toName": "...", "type": "...", "detail": "...", "chapter": 1, "confidence": 0.9, "evidence": "本章原文关键短语" }],
+  "abilities": [{ "entityName": "...", "name": "...", "category": "ability", "system": "...", "path": "...", "level": "...", "sourceEntity": "...", "acquiredChapter": 1, "summary": "...", "chapter": 1, "evidence": "读者在本章得知该能力的原文关键短语" }],
+  "events": [{ "chapter": 1, "participantNames": ["..."], "type": "...", "summary": "...", "importance": 0.5, "evidence": "本章原文关键短语" }],
+  "memoryAnchors": [{ "entityName": "...", "chapter": 1, "kind": "visual|behavior|habit|interaction|role|quote", "summary": "...", "importance": 0.6, "memorability": 0.9, "protagonistRelevance": 0.5, "evidence": "本章原文关键短语" }],
   "possibleDuplicates": [{ "entityA": "...", "entityB": "...", "reason": "..." }],
   "conflicts": [{ "kind": "fact_conflict", "entityName": "...", "detail": "...", "chapterA": 1, "chapterB": 2 }],
   "batchSummary": "2~3句话概括本批章节的剧情进展，供下一批抽取参考。"
 }
 
 evidence 要求（所有 temporal 记录：newEntities/aliases/facts/relations/abilities/events/memoryAnchors）：
-- 必须来自 record.chapter 对应章节的原文，短引用（≤ 25 字）；程序会校验 evidence 是否存在该章原文。
-- 不要整段复制、不要总结成另一句、不要编造。aliases/facts/relations/abilities/memoryAnchors 的 evidence 为**必填**；
+- evidence = **4~12 字的关键短语**：从 record.chapter 对应章节、承载该知识的那【一句话】里挑出的独特片段。
+- 不需要逐字照抄（允许一两个字记错），但必须能在该章【同一句话】里被找到；程序会用它定位那句话并自动落定逐字原句为证据。
+- 不要总结成另一句话、不要把两处文字拼在一起、不要编造。aliases/facts/relations/abilities/memoryAnchors 的 evidence 为**必填**；
   events/newEntities 的 evidence 若给出也会被校验（建议尽量给）。
 - abilities 的 acquiredChapter 是"故事内获得时间"，不要求原文在当章直接出现，无需为其提供 evidence；只有 abilities.chapter（Reveal Chapter）需要。
 
@@ -161,7 +156,7 @@ memoryAnchors 的 kind（记忆线索类型，轻量枚举，从下面选一个�
    - 只在明显偏离默认时才显式给出，其余一律省略。
    - **kind 不要省略**：每条 MemoryAnchor 都应给出 kind（这决定了它在召回时如何被解读）。
    - **evidence 不要省略**：aliases/facts/relations/abilities/memoryAnchors 的 evidence 是必填（校验不过会整批重试）；
-     它是原文短引（≤ 25 字），不是额外负担——照抄原文关键词句即可。
+     它是 4~12 字的独特关键短语，不是额外负担——照抄那句话里最独特的几个字即可。
 3. 数量上限（按本批章节总量控制）：每章 facts ≤ 5 条（同维度事实合并成一条）、events ≤ 3 个、memoryAnchors ≤ 3 条（**角色有高识别度线索时必须达到，没有则 0~1 条，不要硬凑**）；aliases 只收真正新增且对记忆恢复有用的称呼，杜绝罗列。
 4. 已存在实体（通过工具检索命中的）：只输出【本批新增或变化】的信息——新别名、新关系、能力变化、新经历、身份变化；【绝不重复】其身份、性格、背景等已有内容。
    - **例外（稀疏实体补充）**：工具返回会带该实体的 "facts"/"anchors" 数量。若某个已存在实体 "facts"/"anchors" 很少
@@ -177,9 +172,13 @@ export function buildFixInstruction(feedback: string): string {
   const hint = feedback.includes("newEntities.type 非法")
     ? "\n- 能力/技能/招式/功法【永远】不允许出现在 newEntities 里（不存在 \"ability\" 这个实体类型）。请【删除】这些条目，不要保留、不要改写类型；能力只属于 abilities 数组（已在里面就保持原样，不要再建实体）。newEntities.type 只允许 character|organization|location|item|concept。"
     : feedback.includes("缺少 evidence")
-      ? "\n- 校验器要求每条 temporal 记录（aliases/facts/relations/abilities/memoryAnchors）都必须提供 evidence：来自该章原文的短引用（≤ 25 字）。请给被点名的条目补上 evidence，并把 chapter 设为该 evidence 真正出现的章节。"
-      : feedback.includes("原文中不存在")
-        ? `\n- 被点名的 evidence 在你声明的 chapter 原文里找不到。原因通常是：① evidence 是总结/改写而非原文原句；② 把该章两处/两句的片段拼接到一起（即使两段都出现在该章、即使没写省略号，只要 normalize 后不是连续出现就通不过）；③ 章节号填错（±1~2 章最常见）。请改为【逐字照抄】该章原文中【单独一句、连续出现】的短片段（不要总结、不要拼接、不要改写），并确认 chapter 就是这句话所在章节。\n- 【重点】如果错误信息中含有【定位：该 evidence 实际可在第 X 章原文中找到】，说明你写的 evidence 是真实原文、只是章节填错了——直接把该记录的 chapter 改为 X 即可（除非该知识确实最早在别的章节揭晓，那时请改用那章原文逐字出现的短句）。**不要调用 search_chapter_evidence 逐条检索**：定位信息已给出答案，直接照抄即可，逐条检索只会浪费大量时间。如果错误信息没有定位提示，说明该 evidence 在本批任何章节都找不到，请换成你确定的原文原句。`
+      ? "\n- 校验器要求每条 temporal 记录（aliases/facts/relations/abilities/memoryAnchors）都必须提供 evidence：4~12 字的独特关键短语（来自该章原文某一句话，不必逐字）。请给被点名的条目补上短语，并把 chapter 设为该短语真正出现的章节。"
+      : feedback.includes("关键短语过短")
+        ? "\n- 你给的 evidence 太短（normalize 后不足 2 个字），无法定位。请给出该章某句话里 4~12 字的独特短语（如「马哥，冰泉街那边来消息了」）。"
+        : feedback.includes("关键短语过泛")
+          ? "\n- 你给的 evidence 在该章【多句】中都出现（如「马哥」），无法确定承载句。请换成更独特的短语——带上这句话特有的词，确保该章只有一句包含它。"
+          : feedback.includes("原文中不存在")
+            ? `\n- 被点名的 evidence（关键短语）在你声明的 chapter 原文里找不到承载它的【单独一句】。原因通常是：① 短语是总结/改写而非原文字句；② 短语横跨了该章两句话/两处（即使片段都出现在该章也不允许）；③ 章节号填错（±1~2 章最常见）。请改为该章【同一句话】内的独特短语（4~12 字，不必逐字，允许一两个字记错）。\n- 【重点】如果错误信息中含有【定位：该关键短语实际可在第 X 章原文中找到】，说明你的短语是对的、只是章节填错了——直接把该记录的 chapter 改为 X 即可（除非该知识确实最早在别的章节揭晓）。**不要调用 search_chapter_evidence 逐条检索**：定位信息已给出答案，直接照做即可，逐条检索只会浪费大量时间。如果错误信息没有定位提示，说明该短语在本批任何章节都找不到，请换成你确定的那句话里的字词。`
         : feedback.includes("被截断")
           ? "\n- 上次输出超过长度上限被截断。请【大幅精简】：只输出 JSON 对象本身，禁止任何解释/思考/检索过程描述（中英文都不行），summary/value/detail 用最简表达，不重复已知信息。"
           : feedback.includes("无法解析为 JSON")

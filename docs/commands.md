@@ -118,7 +118,7 @@ Build 只走 Agent 化抽取（注入式已移除）。与 Ask 的 Reader Agent 
 - 模型最终输出必须是一个 JSON 对象（9 个数组：`newEntities / aliases / facts / relations / abilities / events / memoryAnchors / possibleDuplicates / conflicts` + `batchSummary`）。**所有 temporal 记录（aliases/facts/relations/abilities/events/memoryAnchors/newEntities）都要带 `evidence`（该章原文短引）**。输出无法解析为 JSON → 抛错交 pipeline 重试。
 - **MemoryAnchor 是一等目标（P0：Character Recall）**：系统提示词（`build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`）把 MemoryAnchor 重新定义为——"用户未来忘记人物名字后，可能会拿来描述这个人物、并借此重新定位他的具体记忆线索"（不是"重要剧情摘要/高重要度事件"），优先级不低于普通 Fact；并明确区分两个维度：`importance`（剧情重要度）与 `memorability`（记忆识别度）。同一提示词内包含 **Character Recall Sweep**：输出前对当前批次每个重要角色逐个检查（外貌/身体特征、典型行为、重复习惯、日常职责、说话方式、主角初见画面、具体互动、反复出现的物品/动作/场景、"读者忘记名字后最可能用什么模糊描述找他"），有高识别度线索就产出 MemoryAnchor——不因"准确率优先/只抽重要信息/控制输出长度"而过滤外貌、日常行为、习惯、典型动作、说话方式、日常职责等。
 - `memoryAnchors` 条目带 `kind`（轻量枚举）：`visual`（外貌/视觉画面）、`behavior`（典型行为/动作）、`habit`（习惯/重复特征）、`interaction`（与主角或重要角色的典型互动）、`role`（日常职责/团队定位）、`quote`（说话方式/口头特征）。旧输出无 `kind` 时校验器兼容为 `null`；给出非法值则整批校验失败。summary 允许略长（≤30 字）以保留"用户可能用来回忆的原话感"（如「高大沉默的三师兄，一路拉着装满戏台道具的板车」）。
-- 校验硬规则（`build/validation.ts`）：结构/类型/confidence、**【Batch Range】所有 chapter ∈ [start, end]**（防幻觉章节号）、`newEntities.type ∈ character|organization|location|item|concept`（能力/技能**永远**不能当实体类型）、**【Evidence Grounding】aliases/facts/relations/abilities/memoryAnchors 必须给出 evidence，且 `chapter + evidence` 必须在对应章节原文中确定性验证**（normalize 空白/标点后优先【严格连续出现】；对 ≤40 字短证据额外接受【近字容错】（与原文某连续片段仅差 1~2 字，如「身体上的零件」↔「身上的零件」）与【同句少量省略】（可对齐为某连续片段的子序列，省略每段 ≤12 字、全程 ≤16 字；跨句/远距离拼接仍拒绝）；`events`/`newEntities` 的 evidence 可选但给出也会校验；`ability.acquiredChapter` 是 Story Time，不要求原文在当章直接出现、无需 evidence）。校验失败 → `buildValidationFeedback` 点名 + `buildFixInstruction` 注入下次 prompt（见下"修复机制"）。
+- 校验硬规则（`build/validation.ts`）：结构/类型/confidence、**【Batch Range】所有 chapter ∈ [start, end]**（防幻觉章节号）、`newEntities.type ∈ character|organization|location|item|concept`（能力/技能**永远**不能当实体类型）、**【Evidence Grounding】aliases/facts/relations/abilities/memoryAnchors 必须给出 evidence——一个 4~12 字的【关键短语】**（该章原文某句话内的独特片段，不必逐字；允许一两个字记错），校验器用【短语接地】（`groundEvidencePhrase`）把它定位到声明章节的【承载句】：在【单句内】做 normalize 后 逐字连续 > 近字容错（1~2 字）> 少量省略容错；接地成功后把【该句逐字原话】落定为正式 evidence（只在 Build 数据流内，不入库）。跨句短语、过泛短语（多句都出现）、过短短语、无法接地 → 校验失败并附【定位 + 直接修正指令】；`events`/`newEntities` 的 evidence 可选且仍按旧引文容错校验（仅 warning）；`ability.acquiredChapter` 是 Story Time，不要求原文在当章直接出现、无需 evidence。
 
 ### 入库（单事务，全部同步）
 ```
@@ -156,9 +156,12 @@ repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
 
 ### Evidence Grounding / Provenance（P0：Reveal Chapter 归因）
 - **问题**：旧 Build 里 LLM 正确理解"闻人佑负责做饭"，却把 chapter 填成 384（原文实际 396/397）、拉板车填成 391（原文 392）。Validator 只查 `start<=chapter<=end`，拦不住这种 **Temporal Attribution Error**。
-- **方案**：`chapter/fromChapter/firstSeenChapter` 不再是"LLM 凭记忆填的数字"，而是必须带 `evidence`（该章原文短引），由 `validateExtractionOutput` 用**当前 Batch 章节原文**做确定性验证（`evidenceInChapter`：normalize 后严格 substring，或对 ≤40 字短证据做近字容错 / 同句少量省略匹配）。校验失败 → 反馈回 LLM 修正（不静默改 chapter）。反馈会带**拼接/未找到诊断**（`diagnoseEvidenceMismatch`）：片段在该章出现但不连续 → 提示跨句拼接需改为单句连续原文；完全找不到 → 提示总结/改写/编造或章节号填错；并带**定位提示**（`locateEvidenceInBatch`）：evidence 若实际存在于本批其他章节，直接点名该章节与原文片段，让模型改对 chapter。
-- **normalize 规则**（`validation.ts`）：NFKC（全角→半角）→ 移除所有标点/符号 → 移除所有空白（含换行）→ 小写 → 优先 substring；容错层（`nearMatch` 子串编辑距离 ≤ max(1, len/10) 字、`gapSequenceMatch` 子序列省略 ≤ 12 字/段 ≤ 16 字全程、evidence 侧改写 ≤ 2 字）。不做 embedding/模糊语义验证。
-- **最早证据**：同一 evidence 若在本 Batch 更早章节也出现，产生**非致命 warning**（提示 chapter 可能不是最早 Reveal Chapter，建议改用更早章节 evidence），不失败。
+- **方案（关键短语接地，Evidence Phrase Grounding）**：`chapter/fromChapter/firstSeenChapter` 不再是"LLM 凭记忆填的数字"。模型为每条 temporal 记录给出 `evidence` = **4~12 字的关键短语**（该章原文某句话内的独特片段，允许一两个字记错、不必逐字）；`validateExtractionOutput` 用 `groundEvidencePhrase` 把短语【接地】到声明章节的承载句——在**单句内**做 normalize 后 逐字连续 > 近字容错 > 少量省略容错——并把**该句逐字原话**落定为正式 evidence。接地由构造保证逐字：改写/拼接/emoji 污染的引文无法进入通过态。校验失败 → 反馈回 LLM 修正（不静默改 chapter）：
+  - **跨句短语**：片段在该章能零散找到但没有任何单独一句完整承载 → 提示"横跨两句"，改为单句内的短语；
+  - **过泛短语**：短语在本章多句都出现（如「马哥」）→ 无法确定承载句，提示换更独特短语；
+  - **找不到**：总结/编造或章节号填错；并带**定位提示 + 直接修正指令**（`locateEvidenceInBatch` 句级定位）：短语若实际存在于本批其他章节，直接给出"把 chapter 从 X 改为 Y"。
+- **normalize 规则**（`validation.ts`）：NFKC（全角→半角）→ 移除所有标点/符号 → 移除所有空白（含换行）→ 小写；句子切分只在 。！？ 后断句（……/换行不断句，小说对白按行排版）；接地匹配在单句 normalize 文本上进行。不做 embedding/模糊语义验证。
+- **最早证据**：同一短语若在本 Batch 更早章节也出现，产生**非致命 warning**（提示 chapter 可能不是最早 Reveal Chapter，建议改用更早章节 evidence），不失败。
 - **evidence 是否持久化**：**否**。evidence 是原文片段，只存在于 Build 数据流（内存校验），**不写入 Story DB、不进任何 Reader-facing API**——这是"Reader 永远不能访问小说原文"硬约束的结构性保证（web `/api/entity` 全行序列化也不会泄漏）。可观测性：mainline 每批记录 `evidenceValidated`（带 evidence 记录数）与 `evidenceWarnings`。
 
 ### 可观测性
@@ -270,7 +273,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 6. **`story init <文件>` 会清空全部旧数据**（更换小说 = 用新文件重跑 init）；build 的 `failed` 批次不会被跳过，重跑自动重试。
 7. **三个概念不要混**：`availableThrough`（导入到哪）/ `builtThrough`（构建到哪）/ `userChapter`（读到哪）。
 8. **MemoryAnchor = 记忆线索（不是剧情摘要）**：Build 侧它是"读者忘记人物名字后拿来重新定位他的画面/行为/特征"，`importance`（剧情重要度）与 `memorability`（记忆识别度）是两回事；Reader 侧它是人物模糊召回的一等数据源（见 §4 搜索权重）。Schema 用 `kind` 标记线索类型（visual/behavior/habit/interaction/role/quote），旧数据兼容为 NULL。
-9. **Reveal Chapter 必须有证据**：任何影响 Reader Reveal Time 的 `chapter/fromChapter/firstSeenChapter` 都必须带 `evidence`（该章原文短引），由校验器对当前 Batch 原文做确定性验证（normalize 后严格 substring + 近字/少量省略容错，见 §3 Evidence Grounding）。校验失败 → 反馈 LLM 修正；反馈会带**定位提示**（evidence 实际所在章节 + 原文片段）帮助模型改对 chapter，但**代码绝不静默改 chapter，也不自动搜索全 Batch 偷偷修正**。evidence 是 Compiler provenance，不入库、不进 Reader。
+9. **Reveal Chapter 必须有证据**：任何影响 Reader Reveal Time 的 `chapter/fromChapter/firstSeenChapter` 都必须带 `evidence`——一个 4~12 字的关键短语（该章原文某句话内，不必逐字），由校验器【短语接地】到声明章节的承载句并落定该句逐字原话（见 §3 Evidence Grounding）。校验失败 → 反馈 LLM 修正；反馈会带**定位提示**（短语实际所在章节 + 原句片段）帮助模型改对 chapter，但**代码绝不静默改 chapter，也不自动搜索全 Batch 偷偷修正**。evidence 是 Compiler provenance，不入库、不进 Reader。
 
 ---
 
