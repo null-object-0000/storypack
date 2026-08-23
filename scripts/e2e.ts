@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { StoryRepo } from "../src/db/repo.js";
 import { validateExtractionOutput, ValidationError, MEMORY_ANCHOR_KINDS, normalizeEvidenceText, evidenceInChapter } from "../src/build/validation.js";
+import { extractJson } from "../src/llm/openai.js";
 import { searchEntities } from "../src/reader/search.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -201,6 +202,52 @@ function main(): number {
     assert(rejected, "编造 evidence 必须失败");
   });
 
+  test("Evidence：近字容错（与原文仅差 1~2 字）→ PASS", () => {
+    // 原句「张三每天都戴着一条红围巾」被写成「张三每天都戴着红围巾」（漏 1 字）→ 应通过
+    const ok = validateExtractionOutput(
+      { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "戴红围巾", chapter: 11, confidence: 0.9, evidence: "张三每天都戴着红围巾" }] },
+      1, 20, ch10
+    );
+    assert(ok.facts.length === 1, "与原文仅差 1 字的 evidence 应通过（近字容错）");
+  });
+
+  test("Evidence：同句省略填充字（子序列匹配）→ PASS", () => {
+    // 原句「张三每天都戴着一条红围巾」被引为「张三戴着红围巾」（省略"每天都…一条"填充部分）→ 应通过
+    const ok = validateExtractionOutput(
+      { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "戴红围巾", chapter: 11, confidence: 0.9, evidence: "张三戴着红围巾" }] },
+      1, 20, ch10
+    );
+    assert(ok.facts.length === 1, "省略同句填充成分的 evidence 应通过（少量省略容错）");
+  });
+
+  test("Evidence：跨句拼接（多处远距离片段）→ FAIL", () => {
+    // 「张三红围巾」若拆成两段远距离片段拼接（此处 ch10 只有一句话，构造 from 远处两段）——
+    // 用「天气张三消息」验证：两个片段都在该章但彼此相隔很远 → 必须失败
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "测试", chapter: 10, confidence: 0.9, evidence: "天气张三消息" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /原文中不存在/.test((e as Error).message);
+    }
+    assert(rejected, "远距离拼接的 evidence 必须失败");
+  });
+
+  test("Evidence：错误 chapter 反馈带【定位】（evidence 在 11 章，声明 10 章）", () => {
+    let msg = "";
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "每天都戴红围巾", chapter: 10, confidence: 0.9, evidence: "张三每天都戴着一条红围巾" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      msg = e instanceof Error ? e.message : String(e);
+    }
+    assert(/第11章/.test(msg) && /定位/.test(msg), `错误反馈应点名 evidence 实际所在章节（含定位），实际：${msg.slice(0, 200)}`);
+  });
+
   test("Evidence：必填类型缺 evidence → FAIL", () => {
     let rejected = false;
     try {
@@ -267,6 +314,47 @@ function main(): number {
       1, 20, ch
     );
     assert(ok.warnings.length >= 1 && /第10章也出现/.test(ok.warnings[0]), "evidence 在更早章节出现应产生 warning（不失败）");
+  });
+
+  // ---- 抽取 JSON 形状守卫：防止"嵌套对象片段被当成整批输出"的静默抽空 ----
+  test("抽取 JSON 形状守卫：嵌套对象片段（单个实体条目）→ 校验失败（防静默抽空）", () => {
+    // 模型 JSON 语法错误时，旧 extractJson 退路会落到第一个可解析的嵌套对象
+    // （如单个 newEntities 条目 {name,type,firstSeenChapter,evidence}）——必须作为"无法解析"失败，而不是空批通过。
+    let rejected = false;
+    let msg = "";
+    try {
+      validateExtractionOutput(
+        { name: "陈伶", type: "character", firstSeenChapter: 1, evidence: "陈伶……一个名字" },
+        1, 20
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError;
+      msg = e instanceof Error ? e.message : "";
+    }
+    assert(rejected, "嵌套对象片段必须校验失败");
+    assert(/无法解析为 JSON/.test(msg), `失败消息应含"无法解析为 JSON"以触发修复提示，实际：${msg.slice(0, 120)}`);
+  });
+
+  // ---- extractJson：全角结构标点修复 + accept 谓词 ----
+  test("extractJson：全角逗号当结构分隔符 → 修复后能解析出完整抽取 JSON", () => {
+    const broken =
+      '前言文字 {"newEntities": [], "aliases": [], "facts": [{"entityName": "张三", "type": "role", "value": "村长"， "chapter": 3， "confidence": 0.9, "evidence": "他是村长"}], "relations": [], "abilities": [], "events": [], "memoryAnchors": [], "possibleDuplicates": [], "conflicts": [], "batchSummary": "x"}';
+    const ok = extractJson(broken);
+    assert(ok !== null && Array.isArray((ok as any).facts) && (ok as any).facts.length === 1, "全角结构标点应被修复并解析");
+    assert((ok as any).facts[0].chapter === 3, "字段值应保持正确（chapter=3）");
+  });
+
+  test("extractJson：accept 谓词过滤嵌套对象片段", () => {
+    // 片段：单个实体条目（无抽取根结构）
+    const fragment = "{\"name\": \"陈伶\", \"type\": \"character\", \"firstSeenChapter\": 1, \"evidence\": \"x\"}";
+    assert(extractJson(fragment, (o) => (o as any).newEntities) === null, "无抽取根结构的片段应被拒掉");
+    // 片段：search_existing_entities 工具回显（aliases 是数组、facts/anchors 是数字）→ 拒掉
+    const echo = "{\"id\":\"x\",\"name\":\"楚牧云\",\"type\":\"character\",\"aliases\":[],\"facts\":5,\"anchors\":2}";
+    assert(extractJson(echo, (o) => (o as any).newEntities) === null, "工具回显片段应被拒掉");
+    // 完整抽取 JSON（即使外层语法瑕疵导致走退路）→ 应返回完整对象
+    const full = '{"newEntities": [], "facts": [{"entityName": "张三", "type": "role", "value": "v"， "chapter": 3}]}';
+    const ok2 = extractJson(full, (o) => (o as any).newEntities) as any;
+    assert(ok2 !== null && Array.isArray(ok2.facts) && ok2.facts.length === 1, "含抽取根结构的完整 JSON 应被接受");
   });
 
   // ---- MemoryAnchor kind 持久化 + userChapter 可见性过滤 ----

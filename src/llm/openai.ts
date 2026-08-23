@@ -301,35 +301,86 @@ function contentBlocks(blocks: { type: string; text?: string }[]): string {
   return (blocks ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
 }
 
-/** 从模型输出中提取 JSON（容忍 markdown 代码块、前后杂质）。
- *  失败时优先从【最后一个】"{" 开始向后扫描配对 "}"，逐个候选尝试 JSON.parse——
- *  推理前言/解释文字里若混入了花括号（如「{...}」占位示例），旧的"取第一个 { 到最后一个 }"会提取错。 */
-export function extractJson(text: string): unknown | null {
+/** 修复常见 JSON 语法瑕疵（只动"结构标点"，绝不改字符串内容）：
+ *  字符串外的 全角逗号/冒号/分号（，：；）→ 半角（, : ;）——
+ *  模型把中文标点当作 JSON 结构分隔符是最高频的语法错误（如 `"value": "xxx"， "chapter": 4`）。
+ *  字符串内部保持原样。 */
+function repairFullWidthStructuralPunct(text: string): string {
+  let out = "";
+  let inStr = false;
+  let esc = false;
+  for (const ch of text) {
+    if (inStr) {
+      out += ch;
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "，" || ch === "：" || ch === "；") {
+      out += ch === "，" ? "," : ch === "：" ? ":" : ";";
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** 候选 JSON 对象的接受谓词：用于构建侧过滤掉"嵌套对象片段"（如单个 newEntities 条目）。 */
+export type JsonAccept = (obj: Record<string, unknown>) => boolean;
+
+/** 从模型输出中提取 JSON（容忍 markdown 代码块、前后杂质、全角结构标点）。
+ *  流程：原文本 parse → 全角结构标点修复后 parse → 逐个 "{" 配对尝试（取【最大跨度】且通过 accept 的候选）。
+ *  accept 提供时：候选对象必须被接受才返回——构建侧用它排除"只提取到嵌套对象片段"的假成功
+ *  （模型 JSON 语法错误时，旧的退路算法会落到第一个可解析的嵌套对象（如单个实体条目），
+ *   导致整批静默抽空仍标记 done——这是数据丢失级 bug，必须拦住）。 */
+export function extractJson(text: string, accept?: JsonAccept): unknown | null {
   const t = (text ?? "").trim();
   if (!t) return null;
-  const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/m.exec(t);
-  const candidate = fence ? fence[1] : t;
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    // 收集所有 "{" 位置，从前往后找第一个能解析出【完整】JSON 对象的候选——
-    // 推理前言/解释文字里混入的花括号占位（如 "{...}"）通常解析失败会被跳过，
-    // 从而定位到真正的 JSON（最外层对象）；旧的"取第一个 { 到最后一个 }"在杂质含花括号时提取错。
-    const starts: number[] = [];
-    for (let i = 0; i < candidate.length; i++) {
-      if (candidate[i] === "{") starts.push(i);
+  const seen = new Set<string>();
+  for (const cand of [t, repairFullWidthStructuralPunct(t)]) {
+    if (seen.has(cand)) continue;
+    seen.add(cand);
+    const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/m.exec(cand);
+    const c = fence ? fence[1] : cand;
+    try {
+      const obj = JSON.parse(c);
+      if (!accept || accept(obj as Record<string, unknown>)) return obj;
+    } catch {
+      // 继续退路
     }
+    // 退路：收集所有 "{" 位置，从前往后找能解析出【完整】JSON 对象的候选——
+    // 推理前言/解释文字里混入的花括号占位（如 "{...}"）通常解析失败会被跳过。
+    const starts: number[] = [];
+    for (let i = 0; i < c.length; i++) {
+      if (c[i] === "{") starts.push(i);
+    }
+    let best: unknown = null;
+    let bestSpan = -1;
     for (let k = 0; k < starts.length; k++) {
-      const end = matchJsonObjectEnd(candidate, starts[k]);
+      const end = matchJsonObjectEnd(c, starts[k]);
       if (end === -1) continue;
+      let obj: unknown;
       try {
-        return JSON.parse(candidate.slice(starts[k], end + 1));
+        obj = JSON.parse(c.slice(starts[k], end + 1));
       } catch {
-        // 该候选不可解析，继续试下一个 "{"（可能是前言里的伪 JSON/缩写占位）
+        continue; // 该候选不可解析，继续试下一个 "{"（可能是前言里的伪 JSON/缩写占位）
+      }
+      if (accept && !accept(obj as Record<string, unknown>)) continue;
+      // 最大跨度优先：外层完整对象（能解析时）总能胜过内部嵌套片段
+      if (end - starts[k] > bestSpan) {
+        best = obj;
+        bestSpan = end - starts[k];
       }
     }
-    return null;
+    if (best !== null) return best;
   }
+  return null;
 }
 
 /** 从 open 位置向后找配对的 "}"（跳过字符串字面量与嵌套对象/数组）；找不到返回 -1 */

@@ -13,7 +13,7 @@ import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ExtractionInput, ExtractionResult } from "../llm/types.js";
 import { extractJson } from "../llm/openai.js";
 import { EXTRACTION_SYSTEM_PROMPT, buildFixInstruction } from "./prompts.js";
-import { normalizeEvidenceText } from "./validation.js";
+import { normalizeEvidenceText, isExtractionRootObject } from "./validation.js";
 import type { BuildSessionLogger } from "./session-log.js";
 import type { NovelTool } from "../reader/tools.js";
 import { log, warn } from "../logger.js";
@@ -272,13 +272,16 @@ ${chapters}
   try {
     await agent.prompt(userMessage);
 
-    const json = extractJson(finalText);
+    // 顶层结构形状守卫：提取结果必须是"抽取 JSON 根对象"（isExtractionRootObject，与校验器共用）。
+    // 防止 extractJson 退路算法把"嵌套对象片段"（单个实体/能力条目、search_existing_entities 工具回显等）
+    // 当整批输出——那会静默抽空整批仍标记 done（数据丢失级 bug）。
+    const json = extractJson(finalText, (o) => isExtractionRootObject(o));
     if (json === null) {
       // 区分"截断"与"格式错误"：让 pipeline 的反馈机制能给出针对性修复提示（见 prompts.buildFixInstruction）
       if (lastStopReason === "length") {
         throw new Error("Agent 输出被截断（达到输出上限，JSON 不完整）");
       }
-      throw new Error("Agent 输出无法解析为 JSON");
+      throw new Error("Agent 输出无法解析为 JSON（可能 JSON 语法错误、或只提取到了嵌套对象片段）");
     }
     if (toolCalls > 0) {
       log(`  [${input.range}] agent 工具调用 ${toolCalls} 次（search_existing_entities）`);
