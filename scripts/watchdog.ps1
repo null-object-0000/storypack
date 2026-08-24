@@ -20,7 +20,8 @@ function IsBuildRunning {
 }
 function LatestRunInfo {
   if (-not (Test-Path $mainline)) { return $null }
-  $lines = Get-Content $mainline -ErrorAction SilentlyContinue
+  # UTF8: mainline.jsonl contains Chinese; ANSI misread breaks JSON parsing and undercounts progress
+  $lines = Get-Content $mainline -Encoding UTF8 -ErrorAction SilentlyContinue
   $lastRun = $null; $batches = @(); $endInfo = $null
   # Benchmark window: only count done batches produced by this grounding re-run
   $bookStart = '2026-08-23T02:37:00'
@@ -44,7 +45,8 @@ function LatestRunInfo {
 function MaxDoneEndSince {
   param([string]$since)
   $maxE = 0
-  $lines = Get-Content $mainline -ErrorAction SilentlyContinue
+  # UTF8: see LatestRunInfo note
+  $lines = Get-Content $mainline -Encoding UTF8 -ErrorAction SilentlyContinue
   foreach ($l in $lines) {
     if (-not $l) { continue }
     try { $o = $l | ConvertFrom-Json } catch { continue }
