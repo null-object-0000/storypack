@@ -55,7 +55,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "login", description: "引导式配置 LLM 连接（baseUrl → apiKey → model → 测试）" },
   { name: "logout", description: "清除已保存的 LLM 连接凭据（baseUrl/apiKey/model）" },
   { name: "chapter", description: "查看/切换当前阅读进度（Ask 防剧透边界）", argumentHint: "<章节号>" },
-  { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--keep-going]" },
+  { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--backup] [--batch-size N] [--auto-batch] [--keep-going]" },
   { name: "import", description: "导入小说文件（会清空现有数据）", argumentHint: "<文件路径>" },
   { name: "review", description: "审核疑似重复/低置信度数据", argumentHint: "[--auto]" },
   { name: "audit", description: "防剧透审计" },
@@ -328,6 +328,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
             fromChapter: typeof flags["--from"] === "number" ? flags["--from"] as number : undefined,
             toChapter: typeof flags["--to"] === "number" ? flags["--to"] as number : undefined,
             force: flags["--force"] === true,
+            // 数据库快照备份（默认关闭；--backup 开启），与 CLI --backup 对齐
+            backup: flags["--backup"] === true,
             batchSize: typeof flags["--batch-size"] === "number"
               ? flags["--batch-size"] as number
               : (cfg.build?.batchSize ?? undefined),

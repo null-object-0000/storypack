@@ -21,6 +21,9 @@ export async function cmdBuild(
     const batchSize = parseNum(flags["--batch-size"]) ?? cfg.build?.batchSize ?? 1;
     const retries = parseNum(flags["--retries"]) ?? cfg.build?.retries ?? 2;
     const force = flags["--force"] === true || flags["--force"] === "true";
+    // 数据库快照备份（默认关闭；--backup 开启）：在构建写入前生成 .story/backups/ 一致性快照
+    const backup = flags["--backup"] === true || flags["--backup"] === "true";
+    if (backup) log(`数据库备份已开启：构建写入前生成 .story/backups/ 快照`);
     // 串行执行：批间存在实体/摘要依赖，--parallel 不再生效（pipeline 会忽略并警告）
     const concurrency = parseNum(flags["--parallel"]) ?? 1;
     // 默认自适应合并（按模型上下文预算自动合并章节，长书省一半以上调用）；
@@ -42,6 +45,7 @@ export async function cmdBuild(
       fromChapter,
       toChapter,
       force,
+      backup,
       batchSize,
       retries,
       concurrency,

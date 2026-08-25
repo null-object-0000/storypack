@@ -103,6 +103,9 @@ cmdBuild
      │         · addLlmLog（usage/耗时/重试次数）
      │     g. 仍失败 → markBatch(status=failed) + addLlmLog(success=0, error) → 批次记 error 原因
      ├─ 5. 串行执行：批间存在强依赖（search_existing_entities 检索 + 滚动摘要），并发参数已忽略
+      ├─ 5.5 数据库快照备份（默认关闭；--backup 开启，或 TUI `/build --backup`）：
+      │     在任何写入前用 VACUUM INTO 生成 .story/backups/story-<时间戳>.db 一致性快照
+      │     （事务一致、含 WAL 已提交数据；同名自动追加序号绝不覆盖）——为 --force 全量重跑提供可回滚点
      └─ 6. failFast（默认 true）：某批失败后停止后续批次（--keep-going 可继续）
 ```
 

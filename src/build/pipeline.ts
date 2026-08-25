@@ -3,6 +3,8 @@
 // 默认构建范围 = 当前已导入但尚未构建的全部章节（availableThrough 起，builtThrough 续）。
 
 import { StoryRepo } from "../db/repo.js";
+import { backupDatabase } from "../db/backup.js";
+import { join } from "node:path";
 import { LlmProvider, ChapterSlice, ExtractionInput } from "../llm/types.js";
 import { validateExtractionOutput, buildValidationFeedback, ValidationError, ExtractionBundle } from "./validation.js";
 import { aliasClashToDuplicate } from "./resolution.js";
@@ -41,6 +43,9 @@ export interface BuildOptions {
   sessionLog?: boolean;
   /** 取消信号：批间检查；abort 后不再开始新批次（当前批次完成后停止）。用于 TUI 构建面板 Esc 取消。 */
   signal?: AbortSignal;
+  /** 构建开始前对 story.db 做一致性快照备份（默认关闭；--backup 开启）。输出到 .story/backups/，
+   *  为 --force 全量重跑提供可回滚点（VACUUM INTO，事务一致、含 WAL 已提交数据）。 */
+  backup?: boolean;
 }
 
 export interface BuildProgress {
@@ -552,6 +557,12 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   const requestedConcurrency = Math.max(1, opts.concurrency ?? 1);
   if (requestedConcurrency > 1) {
     warn(`[build] 已忽略 --parallel ${requestedConcurrency}：批间存在实体/摘要依赖，必须串行执行以保证正确性。`);
+  }
+  // 数据库快照备份（默认关闭；--backup / opts.backup 开启）：在任何写入前生成一致性快照，
+  // 为 --force 全量重跑提供可回滚点。VACUUM INTO 保证事务一致（含 WAL 已提交数据）。
+  if (opts.backup && pending.length > 0) {
+    const snap = backupDatabase(repo.db, { dir: join(".story", "backups") });
+    log(`数据库备份：${snap.path}（${(snap.bytes / 1024).toFixed(0)} KB）`);
   }
   if (totalBatches === 0) {
     // 没有待处理批次，也上报一次空进度（UI 立即显示"无待处理"）

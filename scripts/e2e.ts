@@ -10,6 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { StoryRepo } from "../src/db/repo.js";
+import { backupDatabase } from "../src/db/backup.js";
 import { validateExtractionOutput, ValidationError, MEMORY_ANCHOR_KINDS, normalizeEvidenceText, evidenceInChapter } from "../src/build/validation.js";
 import { extractJson } from "../src/llm/openai.js";
 import { searchEntities } from "../src/reader/search.js";
@@ -484,6 +485,34 @@ function main(): number {
     const row = repo.listMemoryAnchors("character_张三")[0];
     assert(row?.kind === "behavior", "迁移后写入的 kind 应可读回");
     repo.close();
+  });
+
+  // ---- 数据库快照备份（--backup / VACUUM INTO）----
+  test("Backup：backupDatabase 生成一致性快照，可独立打开读回数据", () => {
+    const dbFile = join(UNIT, "backup-src.db");
+    if (existsSync(dbFile)) rmSync(dbFile, { force: true });
+    const repo = new StoryRepo(dbFile);
+    repo.upsertEntity("character", "张三", 1);
+    assert(repo.addFact("character_张三", "role", "备份测试角色", 1, 0.9), "写入测试事实");
+    const dir = join(UNIT, "backups");
+    const snap = backupDatabase(repo.db, { dir, stamp: new Date("2024-08-24T12:00:00Z") });
+    assert(snap.bytes > 0, "备份文件应非空");
+    // 用只读连接打开备份副本，验证数据完整
+    const copy = new DatabaseSync(snap.path);
+    const rows = copy.prepare("SELECT value FROM facts WHERE entity_id = 'character_张三'").all() as { value: string }[];
+    assert(rows.length === 1 && rows[0].value === "备份测试角色", "备份数据应可读回");
+    copy.close();
+    repo.close();
+  });
+
+  test("Backup：目标同名冲突自动追加序号，不覆盖旧备份", () => {
+    const dir = join(UNIT, "backups");
+    const before = existsSync(join(dir, "story-20240824T120000Z.db"));
+    const s1 = backupDatabase(new DatabaseSync(":memory:"), { dir, stamp: new Date("2020-01-01T00:00:00Z") });
+    const s2 = backupDatabase(new DatabaseSync(":memory:"), { dir, stamp: new Date("2020-01-01T00:00:00Z") });
+    assert(existsSync(s1.path), "第一份备份存在");
+    assert(existsSync(s2.path) && s2.path !== s1.path, "同时间戳第二份备份应自动改序号");
+    void before;
   });
 
   // ---- 总结 ----
