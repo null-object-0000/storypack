@@ -81,8 +81,10 @@ cmdBuild
       │           控制输出长度"的过滤倾向 + "绝不重复已有内容"对稀疏实体的误伤，已由 MemoryAnchor 一等目标 +
       │           Character Recall Sweep + 工具返回 facts/anchors 稀疏度 修正，故本次未缩小默认批量（避免成本失控）
      │         · contextWindow/maxTokens 来源：config.llm.{contextWindow,maxTokens} > 环境变量
-     │           LLM_CONTEXT_WINDOW/LLM_MAX_TOKENS > 按模型名内置规格（deepseek-v4-flash/pro = 1M 上下文/256K 输出，
-     │           对齐 deepseek-harness llm-deepseek 的 1_000_000/256e3 默认）> provider.getCapabilities() > 默认（128k / 8192）；
+     │           LLM_CONTEXT_WINDOW/LLM_MAX_TOKENS > 按模型名内置规格（deepseek-v4-flash/pro 与 flowlet-flash/pro =
+     │           1M 上下文/256K 输出——flowlet 本地端点实际服务 deepseek-v4，/v1/models 返回 flowlet-*、响应体 model=deepseek-v4-flash，
+     │           故 MODEL_SPECS 已把这两族对齐；均对齐 deepseek-harness llm-deepseek 的 1_000_000/256e3 默认）
+     │           > provider.getCapabilities() > 默认（128k / 8192）；
      │           maxTokens 同时会作为 API max_tokens 发送
      │     · 固定模式（--batch-size N / config.build.batchSize）：每批 N 章（--batch-size 1 = 逐章，依赖最严格）
      ├─ 3. 断点续跑：跳过 status=done 的批次（batch_state）+ 按"每章都被 done 覆盖"判断
@@ -161,7 +163,7 @@ repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
 - **问题**：旧 Build 里 LLM 正确理解"闻人佑负责做饭"，却把 chapter 填成 384（原文实际 396/397）、拉板车填成 391（原文 392）。Validator 只查 `start<=chapter<=end`，拦不住这种 **Temporal Attribution Error**。
 - **方案（关键短语接地，Evidence Phrase Grounding）**：`chapter/fromChapter/firstSeenChapter` 不再是"LLM 凭记忆填的数字"。模型为每条 temporal 记录给出 `evidence` = **4~12 字的关键短语**（该章原文某句话内的独特片段，允许一两个字记错、不必逐字）；`validateExtractionOutput` 用 `groundEvidencePhrase` 把短语【接地】到声明章节的承载句——在**单句内**做 normalize 后 逐字连续 > 近字容错 > 少量省略容错——并把**该句逐字原话**落定为正式 evidence。接地由构造保证逐字：改写/拼接/emoji 污染的引文无法进入通过态。校验失败 → 反馈回 LLM 修正（不静默改 chapter）：
   - **跨句短语**：片段在该章能零散找到但没有任何单独一句完整承载 → 提示"横跨两句"，改为单句内的短语；
-  - **过泛短语**：短语在本章多句都出现（如「马哥」）→ 无法确定承载句，提示换更独特短语；
+  - **过泛短语**：短语在本章多句都出现（如「马哥」，以及「杀神/血衣/老师/任命书/器官交易」这类实体名/能力名/高频名词——最高频的过泛根因）→ 无法确定承载句，提示换"具体动作+对象"的独特片段（如「抡起椅子砸在门口」）；`EXTRACTION_SYSTEM_PROMPT` 的 evidence 规则 3/9 与 Agent 工作流程附录第 5 条已加入"过泛自查"指导（命名/主题词严禁当 evidence、拿不准时用 `search_chapter_evidence` 确认只命中一句），`buildFixInstruction` 的"关键短语过泛"提示同步强化；
   - **找不到**：总结/编造或章节号填错；并带**定位提示 + 直接修正指令**（`locateEvidenceInBatch` 句级定位）：短语若实际存在于本批其他章节，直接给出"把 chapter 从 X 改为 Y"。
 - **normalize 规则**（`validation.ts`）：NFKC（全角→半角）→ 移除所有标点/符号 → 移除所有空白（含换行）→ 小写；句子切分只在 。！？ 后断句（……/换行不断句，小说对白按行排版）；接地匹配在单句 normalize 文本上进行。不做 embedding/模糊语义验证。
 - **最早证据**：同一短语若在本 Batch 更早章节也出现，产生**非致命 warning**（提示 chapter 可能不是最早 Reveal Chapter，建议改用更早章节 evidence），不失败。

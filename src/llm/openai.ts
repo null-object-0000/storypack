@@ -58,6 +58,10 @@ function deepseekCompat(modelName: string, thinkingFormat: string): Record<strin
 const MODEL_SPECS: Record<string, { contextWindow?: number; maxTokens?: number }> = {
   "deepseek-v4-flash": { contextWindow: 1000000, maxTokens: 256000 },
   "deepseek-v4-pro": { contextWindow: 1000000, maxTokens: 256000 },
+  // flowlet 本地端点实际服务的是 deepseek-v4 系列（/v1/models 返回 id=flowlet-flash/pro、
+  // 响应体 model=deepseek-v4-flash），故对齐 1M 上下文 / 256K 输出，避免回落 128k/8192 导致构建输出被截断。
+  "flowlet-flash": { contextWindow: 1000000, maxTokens: 256000 },
+  "flowlet-pro": { contextWindow: 1000000, maxTokens: 256000 },
 };
 
 export class PiAiProvider implements LlmProvider {

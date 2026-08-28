@@ -61,7 +61,8 @@ const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT}
 4. 未命中检索的旧名字、以及真正第一次登场的新名字，一律作为新实体处理（newEntities 用 name 给出）。
 5. 【Evidence Grounding】每条 temporal 记录（chapter/fromChapter/firstSeenChapter）都要给出 evidence——
     一个 4~12 字的【关键短语】（该章原文某句话内的独特片段，不必逐字）；
-    程序会用它定位那句话并自动落定逐字原句为证据。只有当你记不清出处时，才调用一次 search_chapter_evidence。
+    程序会用它定位那句话并自动落定逐字原句为证据。不要用实体名/能力名/高频名词当短语（必然过泛）；
+    优先选含"具体动作+对象"的独特片段，拿不准是否只出现一次时用 search_chapter_evidence 确认。
 6. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，
    不要输出任何其他文字——禁止解释/思考/检索过程描述（中英文都不行），不要用 markdown 代码块围栏，
    结构标点必须用半角（, : { } [ ] "），避免中文全角标点（，：）。`;
@@ -187,6 +188,11 @@ ${chapters}
 
   // 收集最终文本与真实 usage（多轮工具循环需要累加）
   let finalText = "";
+  /** 最后一条 assistant 消息的完整 content（权威；用于 JSON 抽取）。
+   *  finalText 是跨轮累加的 text_delta，多轮工具循环会把中间"分析文字 + JSON"也拼进去，
+   *  使 extractJson 被多个 JSON 块/分析文字干扰而返回 null（"无法解析为 JSON"高频根因）。
+   *  最终答案只可能在最后一条 assistant 消息里：抽取用 lastAssistantText，finalText 仅作进度/日志。 */
+  let lastAssistantText = "";
   let inputTokens = 0;
   let cachedTokens = 0;
   let outputTokens = 0;
@@ -242,6 +248,7 @@ ${chapters}
       const turnInput = (u?.input ?? 0) + (u?.cacheRead ?? 0) + (u?.cacheWrite ?? 0);
       const turnOutput = (u?.output ?? 0) + (u?.reasoning ?? 0);
       const msgText = contentBlocks(msg.content ?? []) || finalText;
+      if (msgText.trim()) lastAssistantText = msgText;
       sessionLog?.write({
         t: "llm_turn", range: input.range, turn: turnCount++,
         role: msg.role ?? "assistant",
@@ -272,10 +279,19 @@ ${chapters}
   try {
     await agent.prompt(userMessage);
 
+    // 底层 LLM 服务异常（stopReason="error"，0 token）：与"模型输出了非 JSON"是两回事。
+    // 不能误报成"无法解析为 JSON"，否则 pipeline 会给错误的 JSON 修复提示、并带着错误的 feedback 重试。
+    // 单独抛出明确错误 → pipeline 走"网络/超时类错误仅简单重试"分支（不带 feedback，正确等到底层服务恢复）。
+    if (lastStopReason === "error") {
+      throw new Error(`LLM 服务请求失败（stopReason=error，token=0）——底层服务短暂异常，请稍后重试`);
+    }
+
     // 顶层结构形状守卫：提取结果必须是"抽取 JSON 根对象"（isExtractionRootObject，与校验器共用）。
     // 防止 extractJson 退路算法把"嵌套对象片段"（单个实体/能力条目、search_existing_entities 工具回显等）
     // 当整批输出——那会静默抽空整批仍标记 done（数据丢失级 bug）。
-    const json = extractJson(finalText, (o) => isExtractionRootObject(o));
+    // 用最后一条 assistant 消息的完整内容抽取（见 lastAssistantText 注释），
+    // 回退到跨轮累加的 finalText（某些流式路径 message_end 的 content blocks 为空时兜底）。
+    const json = extractJson(lastAssistantText || finalText, (o) => isExtractionRootObject(o));
     if (json === null) {
       // 区分"截断"与"格式错误"：让 pipeline 的反馈机制能给出针对性修复提示（见 prompts.buildFixInstruction）
       if (lastStopReason === "length") {
